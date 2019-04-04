@@ -28,6 +28,7 @@ var PublishRDFDialog = (function() {
 	function PrivateConstructor() {
 		var dialog = $("#publishRDFDialog");
 		var worksheetId;
+		var helper = PublishHelper.getInstance()
 
 		function init() {
 			//Initialize what happens when we show the dialog
@@ -40,116 +41,21 @@ var PublishRDFDialog = (function() {
 				}
 				getRDFPreferences();
 				window.rdfSPAQRLEndPoint = $('#txtData_URL').html();
-				getGraphURI();
-				fetchGraphsFromTripleStore($('#txtData_URL').html());
+				helper.getGraphURIForWorksheet('rdf');
+				helper.fetchGraphsFromTripleStore($('#txtData_URL').html(), 'rdf', dialog);
 			});
 
 			//Initialize handler for Save button
 			//var me = this;
 			$('#btnSave', dialog).on('click', function(e) {
 				e.preventDefault();
-				validateAndPublishRDF(e);
+				graphURI = helper.validate($('#txtData_URL').html(), 'rdf', dialog);
+				if (! graphURI) {
+					return
+				}
+				publishRDFFunction(graphURI);
 			});
 
-		}
-
-		function fetchGraphsFromTripleStore(url) {
-
-			var info = generateInfoObject("", "", "FetchGraphsFromTripleStoreCommand");
-			info["tripleStoreUrl"] = url;
-			var returned = $.ajax({
-				url: "RequestController",
-				type: "POST",
-				data: info,
-				dataType: "json",
-				complete: function(xhr, textStatus) {
-					var json = $.parseJSON(xhr.responseText);
-					graphs = [];
-					if (json["elements"] && json["elements"][0]['graphs']) {
-						graphs = json["elements"][0]['graphs'];
-					}
-					var modelGraphList = $("#modelGraphList");
-					modelGraphList.html('<option value="create_new_context">Create New Context </option>');
-					for (var x in graphs) {
-						modelGraphList.append('<option value="' + graphs[x] + '">' + graphs[x] + '</option>');
-					}
-					if (graphs.length > 0) {
-						modelGraphList.val(graphs[0]);
-						$('#labelFor_rdfSPAQRLGraph').hide();
-						$('#rdfSPAQRLGraph').hide();
-					} else {
-						modelGraphList.val("create_new_context");
-						$('#rdfSPAQRLGraph').val(getUniqueGraphUri());
-						$('#labelFor_rdfSPAQRLGraph').show();
-						$('#rdfSPAQRLGraph').show();
-					}
-
-					modelGraphList.unbind('change');
-					modelGraphList.change(function(event) {
-						if ($('#modelGraphList').val() == "create_new_context") {
-							$('#rdfSPAQRLGraph').val(getUniqueGraphUri());
-							$('#labelFor_rdfSPAQRLGraph').show();
-							$('#rdfSPAQRLGraph').show();
-						} else {
-							$('#labelFor_rdfSPAQRLGraph').hide();
-							$('#rdfSPAQRLGraph').hide();
-						}
-						//$('#rdfSPAQRLGraph').val($('#modelGraphList').val());
-					});
-				},
-				error: function(xhr, textStatus) {
-					alert("Error occurred with fetching graphs! " + textStatus);
-				}
-			});
-		}
-
-		function validateAndPublishRDF() {
-			var expression = /(^|\s)((https?:\/\/)?[\w-]+(\.[\w-]+)+\.?(:\d+)?(\/\S*)?)/gi;
-			// /[-a-zA-Z0-9@:%_\+.~#?&//=]{2,256}\.[a-z]{2,4}\b(\/[-a-zA-Z0-9@:%_\+.~#?&//=]*)?/gi;
-			var regex = new RegExp(expression);
-			var graphUri = "";
-			var needsValidation = false;
-			if ($('#modelGraphList').val() == "create_new_context") {
-				graphUri = $("input#rdfSPAQRLGraph").val();
-				needsValidation = true;
-			} else {
-				graphUri = $('#modelGraphList').val();
-			}
-			// validate the sparql endpoint
-			if (!testSparqlEndPoint($('#txtData_URL').html(), worksheetId)) {
-				alert("Invalid sparql end point. Could not establish connection.");
-				return;
-			}
-
-			// validate the graph uri
-			if (needsValidation) {
-				if (graphUri.length < 3) {
-					alert("Context field is empty");
-					return;
-				}
-				if (!graphUri.match(regex)) {
-					alert("Invalid Url format for context");
-					return;
-				}
-				var newUri = getUniqueGraphUri(graphUri);
-				if (graphUri != newUri) {
-					showError("The context you provided already exists. Please either enter a different context name, " +
-						"or select the context from the 'Use existing context' dropdown");
-					//    				var rdfDialogBox = $("div#confirmPublishRDFDialogBox");
-					//    				rdfDialogBox.find('span').html('The context you provided already exists. <br /> You can either publish to the same \
-					//    						context or use the one that is suggested below. <br /> ' + newUri);
-					//    				
-					//    				rdfDialogBox.dialog({ title:'Confirmation',  width: 700 , buttons: { 
-					//    						"Use Old": function() { publishRDFFunction(graphUri) },
-					//    						"Use New": function() { publishRDFFunction(newUri) },
-					//    						"Cancel": function() { $(this).dialog("close"); }
-					//    					}});
-				} else {
-					publishRDFFunction(graphUri);
-				}
-			} else {
-				publishRDFFunction(graphUri);
-			}
 		}
 
 		function publishRDFFunction(graphUri) {
@@ -170,8 +76,6 @@ var PublishRDFDialog = (function() {
 				replace = true;
 			info["replaceContext"] = replace;
 			info["generateBloomFilters"] = $("input#generateBloomFilters").is(":checked");
-			console.log(info["rdfPrefix"]);
-			console.log(info["rdfNamespace"]);
 			if ($("input#saveToRDFStore").is(":checked")) {
 				publishRDFToStore(info);
 			} else {
@@ -211,29 +115,6 @@ var PublishRDFDialog = (function() {
 			}).show());
 		}
 
-		function getGraphURI() {
-			// get the graph uri for the worksheet
-			var info = generateInfoObject(worksheetId, "", "FetchExistingWorksheetPropertiesCommand");
-
-			var returned = $.ajax({
-				url: "RequestController",
-				type: "POST",
-				data: info,
-				dataType: "json",
-				complete: function(xhr, textStatus) {
-					var json = $.parseJSON(xhr.responseText);
-					var props = json["elements"][0]["properties"];
-
-					// Set graph name
-					if (props["graphName"] != null) {
-						$("#rdfSPAQRLGraph").val(props["graphName"]);
-					} else {
-						$("#rdfSPAQRLGraph").val("");
-					}
-				}
-			});
-		}
-
 		function getRDFPreferences() {
 			var info = generateInfoObject("", "", "FetchPreferencesCommand");
 			info["preferenceCommand"] = "PublishRDFCommand";
@@ -265,41 +146,9 @@ var PublishRDFDialog = (function() {
 			});
 		}
 
-		function getUniqueGraphUri(graphUriTobeValidated) {
-			var info = generateInfoObject(worksheetId, "", "GetUniqueGraphUrlCommand");
-			info["tripleStoreUrl"] = $('#txtData_URL').html();
-			if (graphUriTobeValidated && graphUriTobeValidated != null) {
-				info["graphUri"] = graphUriTobeValidated;
-			}
-			$('#rdfSPAQRLGraph').attr('rel', '');
-			var returned = $.ajax({
-				url: "RequestController",
-				type: "POST",
-				data: info,
-				dataType: "json",
-				async: false,
-				complete: function(xhr, textStatus) {
-					var json = $.parseJSON(xhr.responseText);
-					$('#rdfSPAQRLGraph').attr('rel', json.elements[0].graphUri);
-				},
-				error: function(xhr, textStatus) {
-					alert("Error occurred with fetching graphs! " + textStatus);
-				}
-			});
-			return String($('#rdfSPAQRLGraph').attr('rel'));
-		}
-
 		function hideError() {
 			$("div.error", dialog).hide();
 		}
-
-		function showError(err) {
-			$("div.error", dialog).show();
-			if (err) {
-				$("div.error", dialog).text(err);
-			}
-		}
-
 
 		function hide() {
 			dialog.modal('hide');
@@ -307,6 +156,7 @@ var PublishRDFDialog = (function() {
 
 		function show(wsId) {
 			worksheetId = wsId;
+			helper.show(worksheetId)
 			dialog.modal({
 				keyboard: true,
 				show: true,

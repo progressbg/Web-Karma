@@ -48,6 +48,7 @@ import edu.isi.karma.controller.history.HistoryJsonUtil;
 import edu.isi.karma.controller.update.AbstractUpdate;
 import edu.isi.karma.controller.update.ErrorUpdate;
 import edu.isi.karma.controller.update.HistoryUpdate;
+import edu.isi.karma.controller.update.TrivialErrorUpdate;
 import edu.isi.karma.controller.update.UpdateContainer;
 import edu.isi.karma.controller.update.WorksheetUpdateFactory;
 import edu.isi.karma.modeling.alignment.Alignment;
@@ -59,9 +60,11 @@ import edu.isi.karma.modeling.alignment.learner.PatternWeightSystem;
 import edu.isi.karma.rep.HNode;
 import edu.isi.karma.rep.Worksheet;
 import edu.isi.karma.rep.Workspace;
+import edu.isi.karma.rep.alignment.InternalNode;
 import edu.isi.karma.rep.alignment.LabeledLink;
 import edu.isi.karma.rep.alignment.LinkStatus;
 import edu.isi.karma.rep.alignment.LinkType;
+import edu.isi.karma.rep.alignment.Node;
 import edu.isi.karma.rep.metadata.WorksheetProperties;
 import edu.isi.karma.rep.metadata.WorksheetProperties.Property;
 import edu.isi.karma.view.VWorkspace;
@@ -74,6 +77,8 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 
 	private String worksheetName;
 	private String tripleStoreUrl;
+	private String graphUri;
+	private String modelUri;
 	private String RESTserverAddress;
 	private static Logger logger = LoggerFactory.getLogger(GenerateR2RMLModelCommand.class);
 
@@ -85,9 +90,11 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 		rdfPrefix, rdfNamespace, modelSparqlEndPoint
 	}
 
-	protected GenerateR2RMLModelCommand(String id, String model, String worksheetId, String url, String selectionId) {
+	protected GenerateR2RMLModelCommand(String id, String model, String worksheetId, String url, String selectionId, String graphUri, String modelUri) {
 		super(id, model, worksheetId, selectionId);
 		this.tripleStoreUrl = url;
+		this.graphUri = graphUri;
+		this.modelUri = modelUri;
 	}
 
 	public String getTripleStoreUrl() {
@@ -132,7 +139,6 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 		//save the preferences 
 		savePreferences(workspace);
 		boolean storeOldHistory = modelingConfiguration.isStoreOldHistoryEnabled();
-		System.out.println("storeOldHistory: " + storeOldHistory);
 		Worksheet worksheet = workspace.getWorksheet(worksheetId);
 		SuperSelection selection = getSuperSelection(worksheet);
 		CommandHistory history = workspace.getCommandHistory();
@@ -145,13 +151,32 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 					Property.oldCommandHistory, oldCommandsArray.toString());
 		}
 		CommandHistoryUtil historyUtil = new CommandHistoryUtil(history.getCommandsFromWorksheetId(worksheetId), workspace, worksheetId);
-		if (history.isStale(worksheetId)) {
+		boolean isHistoryStale = history.isStale(worksheetId);
+		if (isHistoryStale) {
+			System.out.println("**** REPLAY HISTORY ***");
 			uc.append(historyUtil.replayHistory());
 			worksheetId = historyUtil.getWorksheetId();
 			worksheet = workspace.getWorksheet(worksheetId);
 			selection = getSuperSelection(worksheet);
 			historyUtil = new CommandHistoryUtil(history.getCommandsFromWorksheetId(worksheetId), workspace, worksheetId);
 		}
+		
+		//Execute all Provenance related commands again before publishing
+		List<Command> wkCommands = historyUtil.getCommands();
+		for(Command wkCommand : wkCommands) {
+			if(wkCommand instanceof SetSemanticTypeCommand) {
+				SetSemanticTypeCommand cmd = (SetSemanticTypeCommand)wkCommand;
+				if(cmd.hasProvenanceType()) {
+					uc.append(workspace.getCommandHistory().doCommand(cmd, workspace, false));
+				}
+			} else if(wkCommand instanceof AddLinkCommand) {
+				AddLinkCommand cmd = (AddLinkCommand)wkCommand;
+				if(cmd.hasProvenanceType()) {
+					uc.append(workspace.getCommandHistory().doCommand(cmd, workspace, false));
+				}
+			}
+		}
+		
 		Set<String> inputColumns = historyUtil.generateInputColumns();
 		Set<String> outputColumns = historyUtil.generateOutputColumns();
 		JSONArray inputColumnsArray = new JSONArray();
@@ -204,20 +229,20 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 				}
 			}
 		}
+		
+		//Make all links to be forced. Add a change links command for all links those links
 		JSONArray newEdges = new JSONArray();
 		JSONArray initialEdges = new JSONArray();
 		ChangeInternalNodeLinksCommandFactory cinlcf = new ChangeInternalNodeLinksCommandFactory();
 		for (LabeledLink link : links) {
-			JSONObject newEdge = new JSONObject();
-			JSONObject initialEdge = new JSONObject();
-			newEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeSourceId.name(), link.getSource().getId());
-			newEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeTargetId.name(), link.getTarget().getId());
-			newEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeId.name(), link.getUri());
-			initialEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeSourceId.name(), link.getSource().getId());
-			initialEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeTargetId.name(), link.getTarget().getId());
-			initialEdge.put(ChangeInternalNodeLinksCommand.JsonKeys.edgeId.name(), link.getUri());
-			newEdges.put(newEdge);
-			initialEdges.put(initialEdge);
+			if(link.getStatus() != LinkStatus.ForcedByUser) {
+				JSONObject newEdge = new JSONObject();
+				newEdge.put(ChangeInternalNodeLinksCommand.LinkJsonKeys.edgeSourceId.name(), link.getSource().getId());
+				newEdge.put(ChangeInternalNodeLinksCommand.LinkJsonKeys.edgeTargetId.name(), link.getTarget().getId());
+				newEdge.put(ChangeInternalNodeLinksCommand.LinkJsonKeys.edgeId.name(), link.getUri());
+				newEdge.put(ChangeInternalNodeLinksCommand.LinkJsonKeys.isProvenance.name(), link.isProvenance());
+				newEdges.put(newEdge);
+			}
 		}
 		JSONArray inputJSON = new JSONArray();
 		JSONObject t = new JSONObject();
@@ -248,6 +273,41 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 			}
 		}
 
+		//Remove all provenance links that do not have Data properties
+		Set<Node> nodes = alignment.getSteinerTree().vertexSet();
+		boolean linksRemoved = false;
+		for (Node node:nodes) {
+			if (node instanceof InternalNode) {
+				Set<LabeledLink> outLinks = alignment.getOutgoingLinksInTree(node.getId());
+				if(outLinks != null && outLinks.size() > 0) {
+					boolean hasProvLink = false;
+					boolean hasDataProperty = false;
+					Set<String> provLinkIds = new HashSet<>();
+					for(LabeledLink link : outLinks) {
+						if(link.isProvenance()) {
+							hasProvLink = true;
+							provLinkIds.add(link.getId());
+							continue;
+						}
+						if(link.getType() == LinkType.DataPropertyLink)
+							hasDataProperty = true;
+					}
+					if(hasProvLink && !hasDataProperty) {
+						//Remove all provenance links
+						for(String linkId : provLinkIds) {
+							logger.info("**** Remove Provenance Link:" + linkId);
+							alignment.removeLink(linkId);
+							linksRemoved = true;
+						}
+					}
+				}
+			}
+		}
+		if(linksRemoved) {
+			uc.append(WorksheetUpdateFactory.createSemanticTypesAndSVGAlignmentUpdates(worksheetId, workspace));
+		}
+		
+		
 		// mohsen: my code to enable Karma to leran semantic models
 		// *****************************************************************************************
 		// *****************************************************************************************
@@ -281,57 +341,60 @@ public class GenerateR2RMLModelCommand extends WorksheetSelectionCommand {
 		try {
 			R2RMLAlignmentFileSaver fileSaver = new R2RMLAlignmentFileSaver(workspace);
 
-			fileSaver.saveAlignment(alignment, modelFileLocalPath);
+			fileSaver.saveAlignment(alignment, null, modelFileLocalPath, false, modelUri);
 
 			// Write the model to the triple store
 
-			// Get the graph name from properties
-			String graphName = worksheet.getMetadataContainer().getWorksheetProperties()
-					.getPropertyValue(Property.graphName);
-			if (graphName == null || graphName.isEmpty()) {
-				// Set to default
-				worksheet.getMetadataContainer().getWorksheetProperties().setPropertyValue(
-						Property.graphName, WorksheetProperties.createDefaultGraphName(worksheet.getTitle()));
-				worksheet.getMetadataContainer().getWorksheetProperties().setPropertyValue(
-						Property.graphLabel, worksheet.getTitle());
-				graphName = WorksheetProperties.createDefaultGraphName(worksheet.getTitle());
-			}
+//			// Get the graph name from properties
+//			String graphName = worksheet.getMetadataContainer().getWorksheetProperties()
+//					.getPropertyValue(Property.graphName);
+//			if (graphName == null || graphName.isEmpty()) {
+//				// Set to default
+//				worksheet.getMetadataContainer().getWorksheetProperties().setPropertyValue(
+//						Property.graphName, WorksheetProperties.createDefaultGraphName(worksheet.getTitle()));
+//				worksheet.getMetadataContainer().getWorksheetProperties().setPropertyValue(
+//						Property.graphLabel, worksheet.getTitle());
+//				graphName = WorksheetProperties.createDefaultGraphName(worksheet.getTitle());
+//			}
 
 			boolean result = true;//utilObj.saveToStore(modelFileLocalPath, tripleStoreUrl, graphName, true, null);
 			if (tripleStoreUrl != null && tripleStoreUrl.trim().compareTo("") != 0) {
-				UriBuilder builder = UriBuilder.fromPath(modelFileName);
-				String url = RESTserverAddress + "/R2RMLMapping/local/" + builder.build().toString();
-				SaveR2RMLModelCommandFactory factory = new SaveR2RMLModelCommandFactory();
-				SaveR2RMLModelCommand cmd = factory.createCommand(model, workspace, url, tripleStoreUrl, graphName, "URL");
-				cmd.doIt(workspace);
-				result &= cmd.getSuccessful();
-				workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelUrl, url);
-				workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelContext, graphName);
-				workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelRepository, tripleStoreUrl);
+				try {
+					UriBuilder builder = UriBuilder.fromPath(modelFileName);
+					String url = RESTserverAddress + "/R2RMLMapping/local/" + builder.build().toString();
+					SaveR2RMLModelCommandFactory factory = new SaveR2RMLModelCommandFactory();
+					SaveR2RMLModelCommand cmd = factory.createCommand(model, workspace, url, tripleStoreUrl, graphUri, "URL");
+					cmd.doIt(workspace);
+					result &= cmd.getSuccessful();
+					workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelUrl, url);
+					workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelContext, graphUri);
+					workspace.getWorksheet(worksheetId).getMetadataContainer().getWorksheetProperties().setPropertyValue(Property.modelRepository, tripleStoreUrl);
+				} catch(Exception e) {
+					logger.error("Error pushing model to triple store", e);
+					result = false;
+				}
 			}
 			final String temp = worksheetId;
-			if (result) {
-				logger.info("Saved model to triple store");
-				uc.add(new AbstractUpdate() {
-					public void generateJson(String prefix, PrintWriter pw,	
-							VWorkspace vWorkspace) {
-						JSONObject outputObject = new JSONObject();
-						try {
-							outputObject.put(JsonKeys.updateType.name(), "PublishR2RMLUpdate");
+			
+			uc.add(new AbstractUpdate() {
+				public void generateJson(String prefix, PrintWriter pw,	
+						VWorkspace vWorkspace) {
+					JSONObject outputObject = new JSONObject();
+					try {
+						outputObject.put(JsonKeys.updateType.name(), "PublishR2RMLUpdate");
 
-							outputObject.put(JsonKeys.fileUrl.name(), contextParameters.getParameterValue(
-									ContextParameter.R2RML_PUBLISH_RELATIVE_DIR) + modelFileName);
-							outputObject.put(JsonKeys.worksheetId.name(), temp);
-							pw.println(outputObject.toString());
-						} catch (JSONException e) {
-							logger.error("Error occured while generating JSON!");
-						}
+						outputObject.put(JsonKeys.fileUrl.name(), contextParameters.getParameterValue(
+								ContextParameter.R2RML_PUBLISH_RELATIVE_DIR) + modelFileName);
+						outputObject.put(JsonKeys.worksheetId.name(), temp);
+						pw.println(outputObject.toString());
+					} catch (JSONException e) {
+						logger.error("Error occured while generating JSON!");
 					}
-				});
-				return uc;
-			} 
-
-			return new UpdateContainer(new ErrorUpdate("Error occured while generating R2RML model!"));
+				}
+			});
+			if(!result)
+				uc.add(new TrivialErrorUpdate("Error pushing model to Triple Store"));
+			return uc;
 
 		} catch (Exception e) {
 			logger.error("Error occured while generating R2RML Model!", e);

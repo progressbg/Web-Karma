@@ -654,7 +654,7 @@ public class GraphUtil {
 		writer.name("uri").value(label.getUri());
 //		writer.name("ns").value(label.getNs());
 //		writer.name("prefix").value(label.getPrefix());
-//		writer.name("rdfsLabel").value(label.getRdfsLabel());
+		writer.name("rdfsLabel").value(label.getRdfsLabel());
 //		writer.name("rdfsComment").value(label.getRdfsComment());
 		writer.endObject();
 	}
@@ -922,14 +922,14 @@ public class GraphUtil {
 	    	String key = reader.nextName();
 			if (key.equals("uri") && reader.peek() != JsonToken.NULL) {
 				uri = reader.nextString();
-//			} else if (key.equals("ns") && reader.peek() != JsonToken.NULL) {
-//				ns = reader.nextString();
-//			} else if (key.equals("prefix") && reader.peek() != JsonToken.NULL) {
-//				prefix = reader.nextString();
-//			} else if (key.equals("rdfsLabel") && reader.peek() != JsonToken.NULL) {
-//				rdfsLabel = reader.nextString();
-//			} else if (key.equals("rdfsComment") && reader.peek() != JsonToken.NULL) {
-//				rdfsComment = reader.nextString();
+			//} else if (key.equals("ns") && reader.peek() != JsonToken.NULL) {
+			//	ns = reader.nextString();
+			//} else if (key.equals("prefix") && reader.peek() != JsonToken.NULL) {
+			//	prefix = reader.nextString();
+			//} else if (key.equals("rdfsLabel") && reader.peek() != JsonToken.NULL) {
+			//	rdfsLabel = reader.nextString();
+			//} else if (key.equals("rdfsComment") && reader.peek() != JsonToken.NULL) {
+			//	rdfsComment = reader.nextString();
 			} else {
 			  reader.skipValue();
 			}
@@ -968,7 +968,7 @@ public class GraphUtil {
 		}
     	reader.endObject();
     	
-    	SemanticType semanticType = new SemanticType(hNodeId, type, domain, origin, confidenceScore);
+    	SemanticType semanticType = new SemanticType(hNodeId, type, domain, null, false, origin, confidenceScore);
     	return semanticType;	
     }
 	

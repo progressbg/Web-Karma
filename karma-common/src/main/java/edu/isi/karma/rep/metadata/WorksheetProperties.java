@@ -44,11 +44,12 @@ public class WorksheetProperties {
 		graphName, serviceUrl, hasServiceProperties, 
 		sourceType, modelUrl, modelRepository, modelContext,
 		baseURI, prefix, graphLabel, inputColumns, 
-		outputColumns, oldCommandHistory
+		outputColumns, oldCommandHistory,
+		GithubURL
 	}
 	
 	public enum SourceTypes {
-		CSV, DB, JSON, XML
+		CSV, DB, JSON, XML, OBJECT
 	}
 	
 	public WorksheetProperties() {
